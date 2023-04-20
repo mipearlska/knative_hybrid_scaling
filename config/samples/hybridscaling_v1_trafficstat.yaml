@@ -1,0 +1,12 @@
+apiVersion: hybridscaling.knativescaling.dcn.ssu.ac.kr/v1
+kind: TrafficStat
+metadata:
+  labels:
+    app.kubernetes.io/name: trafficstat
+    app.kubernetes.io/instance: trafficstat-sample
+    app.kubernetes.io/part-of: knative-hybrid-scaling
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: knative-hybrid-scaling
+  name: trafficstat-sample
+spec:
+  # TODO(user): Add fields here

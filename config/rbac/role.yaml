@@ -1,0 +1,33 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  creationTimestamp: null
+  name: manager-role
+rules:
+- apiGroups:
+  - hybridscaling.knativescaling.dcn.ssu.ac.kr
+  resources:
+  - trafficstats
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - hybridscaling.knativescaling.dcn.ssu.ac.kr
+  resources:
+  - trafficstats/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - hybridscaling.knativescaling.dcn.ssu.ac.kr
+  resources:
+  - trafficstats/status
+  verbs:
+  - get
+  - patch
+  - update
