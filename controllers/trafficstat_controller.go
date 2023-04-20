@@ -18,12 +18,13 @@ package controllers
 
 import (
 	"context"
-	"flag"
+	"fmt"
 	"strconv"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
+
 	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -47,6 +48,9 @@ type TrafficStatReconciler struct {
 //+kubebuilder:rbac:groups=hybridscaling.knativescaling.dcn.ssu.ac.kr,resources=trafficstats/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=hybridscaling.knativescaling.dcn.ssu.ac.kr,resources=trafficstats/finalizers,verbs=update
 
+//+kubebuilder:rbac:groups=serving.knative.dev,resources=services,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
+
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 // TODO(user): Modify the Reconcile function to compare the state specified by
@@ -65,6 +69,8 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if err := r.Get(ctx, req.NamespacedName, &TrafficStatCRD); err != nil {
 		log.Error(err, "unable to fetch client")
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	} else {
+		log.Info("Fetched TrafficStatCRD, target service is: ", "TARGET_SERVICE", TrafficStatCRD.Spec.ServiceName)
 	}
 	// Store Wanted/Target ServiceName from CRD in TargetServiceName variable
 	CRDTargetServiceName := TrafficStatCRD.Spec.ServiceName
@@ -73,9 +79,7 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// Ref:https://stackoverflow.com/questions/66199455/list-service-in-go
 	// This Testbed's MasterNode kubeconfig path = "/root/.kube/config"
 
-	kubeconfig := flag.String("kubeconfig", "/root/.kube/config", "absolute path to the kubeconfig file")
-	flag.Parse()
-	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
+	config, err := clientcmd.BuildConfigFromFlags("", "/root/.kube/config")
 	if err != nil {
 		log.Error(err, "unable to BuildConfigFromFlags using clientcmd")
 	}
@@ -83,16 +87,6 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	serving, err := servingv1client.NewForConfig(config)
 	if err != nil {
 		log.Error(err, "unable to create Knative Serving Go Client")
-	}
-
-	//**Get Service with name == TrafficStatCRD.spec.servicename
-	TargetService, err := serving.Services("default").Get(ctx, CRDTargetServiceName, metav1.GetOptions{})
-	if err != nil {
-		log.Info("TargetService name from CRD is:", CRDTargetServiceName)
-		log.Error(err, "TargetService from CRD is not available in cluster")
-	} else {
-		log.Info("TargetService name from CRD is:", CRDTargetServiceName)
-		log.Info("Found TargetService in cluster:", TargetService.Name)
 	}
 
 	//**Get Service's Concurrency-Resources ConfigMap (CR ConfigMap) with name == TrafficStatCRD.spec.servicename
@@ -105,7 +99,17 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if err := r.Get(ctx, FetchConfigMapObjectKey, TargetConfigMap); err != nil {
 		log.Error(err, "unable to fetch ConfigMap corresponding to CRDTargetService")
 	} else {
-		log.Info("Fetch ConfigMap sucessful:", TargetConfigMap.Name)
+		log.Info("Fetch ConfigMap sucessful:", "CONFIG_MAP-NAME", TargetConfigMap.Name)
+	}
+
+	//**Get Service with name == TrafficStatCRD.spec.servicename
+	TargetService, err := serving.Services("default").Get(ctx, CRDTargetServiceName, metav1.GetOptions{})
+	if err != nil {
+		log.Info("TargetService name from CRD is:", "SERVICE_NAME", CRDTargetServiceName)
+		log.Error(err, "TargetService from CRD is not available in cluster")
+	} else {
+		log.Info("TargetService name from CRD is:", "SERVICE_NAME", CRDTargetServiceName)
+		log.Info("Found TargetService in cluster:", "SERVICE_NAME", TargetService.Name)
 	}
 
 	//**Scaling Logic:
@@ -131,7 +135,9 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 		NumberOfPod := ScalingInputTrafficFloat / ConcurrencyFloat
 		ThisCR_TotalResourcesUsage := NumberOfPod * resourceLevelFloat
-		log.Info(resourceLevel, concurrency, NumberOfPod, ThisCR_TotalResourcesUsage)
+		log.Info("CR Pair", "CR_PAIR", resourceLevel+concurrency)
+		log.Info("This CR Pair Expected NumberOfPod", "EX_NUMBER_OF_PODS", fmt.Sprintf("%v", NumberOfPod))
+		log.Info("This CR Pair Expected Total Resources Usage", "EX_TOTAL_RESOURCES", fmt.Sprintf("%v", ThisCR_TotalResourcesUsage))
 		if ThisCR_TotalResourcesUsage < minimumCR_TotalResourcesUsage {
 			minimumCR_TotalResourcesUsage = ThisCR_TotalResourcesUsage
 			chosen_resourceLevel = resourceLevel + "m"
@@ -139,7 +145,8 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 	}
 
-	log.Info("Chosen CR settings for Hybrid scaling is", chosen_resourceLevel, chosen_concurrency)
+	log.Info("Chosen CR settings for Hybrid scaling is", "RESOURCE", chosen_resourceLevel)
+	log.Info("Chosen CR settings for Hybrid scaling is", "CONCURRENCY", chosen_concurrency)
 
 	//// Define Configuration Yaml Object
 	//// When a new Service is created, Knative assign for that Service an annotation "serving.knative.dev/creator" = The user that created the service.
@@ -200,7 +207,9 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		},
 	}
 
-	log.Info("Creating new Configuration for service ", CRDTargetServiceName, " with CR setting ", chosen_resourceLevel, chosen_concurrency)
+	log.Info("Creating new Configuration for service ", "SERVICE_NAME", CRDTargetServiceName)
+	log.Info("with chosen settings ", "CHOSEN_RESOURCE_LEVEL", chosen_resourceLevel)
+	log.Info("with chosen settings ", "CHOSEN_RESOURCE_LEVEL", chosen_concurrency)
 
 	//// Set ResourceVersion of new Configuration to the current Service's ResourceVersion (Required for Update)
 	NewServiceConfiguration.SetResourceVersion(TargetService.GetResourceVersion())
@@ -210,8 +219,7 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if err != nil {
 		log.Error(err, err.Error())
 	} else {
-		log.Info("New Service Revision Created")
-		log.Info(NewServiceRevision.Name)
+		log.Info("New Service Revision Created", "SERVICE", NewServiceRevision.Name)
 	}
 
 	return ctrl.Result{}, nil
