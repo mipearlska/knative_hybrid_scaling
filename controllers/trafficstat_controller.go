@@ -19,7 +19,10 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"math"
 	"strconv"
+	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -111,6 +114,30 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		log.Info("TargetService name from CRD is:", "SERVICE_NAME", CRDTargetServiceName)
 		log.Info("Found TargetService in cluster:", "SERVICE_NAME", TargetService.Name)
 	}
+	TargetService_Type := TargetConfigMap.Data["resources-intensive-type"]
+	TargetService_RequiredResources := TargetConfigMap.Data["required-resources"]
+	TargetService_Current_Revision := TargetService.Status.LatestReadyRevisionName
+	TargetService_Current_Pair_Concurrency := TargetService.Spec.Template.ObjectMeta.Annotations["autoscaling.knative.dev/target"]
+	TargetService_Current_Pair_Resources_Limit := TargetService.Spec.Template.Spec.Containers[0].Resources.Limits
+	TargetService_Current_Pair_Resources := ""
+	if TargetService_Type == "cpu" {
+		temp1 := strings.Split(fmt.Sprintf("abc", TargetService_Current_Pair_Resources_Limit["cpu"]), "=")
+		temp2 := strings.Split(temp1[1], " ")
+		TargetService_Current_Pair_Resources = temp2[0][2:] + "m"
+	}
+	if TargetService_Type == "memory" {
+		temp1 := strings.Split(fmt.Sprintf("abc", TargetService_Current_Pair_Resources_Limit["memory"]), "=")
+		temp2 := strings.Split(temp1[1], " ")
+		temp3, err := strconv.Atoi(temp2[0][2:])
+		if err != nil {
+			log.Error(err, err.Error())
+		}
+		TargetService_Current_Pair_Resources = string(temp3/1048576) + "Mi"
+	}
+	log.Info("TargetService Type is", "TYPE", TargetService_Type)
+	log.Info("TargetService Required Resources is", "Required_RESOURCE", TargetService_RequiredResources)
+	log.Info("TargetService Current Pair-Concurrency is", "Pair_CONCURRENCY", TargetService_Current_Pair_Concurrency)
+	log.Info("TargetService Current Pair-Resources is", "Pair_RESOURCES", TargetService_Current_Pair_Resources)
 
 	//**Scaling Logic:
 	// If wanted service and CR ConfigMap (get from above) avaialble - NOT null:
@@ -125,23 +152,25 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	var chosen_concurrency string
 
 	for resourceLevel, concurrency := range TargetConfigMap.Data {
-		ConcurrencyFloat, Cerr := strconv.ParseFloat(concurrency, 64)
-		if Cerr != nil {
-			log.Error(Cerr, Cerr.Error())
-		}
-		resourceLevelFloat, Rerr := strconv.ParseFloat(resourceLevel, 64)
-		if Rerr != nil {
-			log.Error(Rerr, Rerr.Error())
-		}
-		NumberOfPod := ScalingInputTrafficFloat / ConcurrencyFloat
-		ThisCR_TotalResourcesUsage := NumberOfPod * resourceLevelFloat
-		log.Info("CR Pair", "CR_PAIR", resourceLevel+concurrency)
-		log.Info("This CR Pair Expected NumberOfPod", "EX_NUMBER_OF_PODS", fmt.Sprintf("%v", NumberOfPod))
-		log.Info("This CR Pair Expected Total Resources Usage", "EX_TOTAL_RESOURCES", fmt.Sprintf("%v", ThisCR_TotalResourcesUsage))
-		if ThisCR_TotalResourcesUsage < minimumCR_TotalResourcesUsage {
-			minimumCR_TotalResourcesUsage = ThisCR_TotalResourcesUsage
-			chosen_resourceLevel = resourceLevel + "m"
-			chosen_concurrency = concurrency
+		if resourceLevel != "resources-intensive-type" && resourceLevel != "required-resources" {
+			ConcurrencyFloat, Cerr := strconv.ParseFloat(concurrency, 64)
+			if Cerr != nil {
+				log.Error(Cerr, Cerr.Error())
+			}
+			resourceLevelFloat, Rerr := strconv.ParseFloat(resourceLevel, 64)
+			if Rerr != nil {
+				log.Error(Rerr, Rerr.Error())
+			}
+			NumberOfPod := math.Round(ScalingInputTrafficFloat / ConcurrencyFloat)
+			ThisCR_TotalResourcesUsage := NumberOfPod * resourceLevelFloat
+			log.Info("CR Pair", "CR_PAIR", resourceLevel+concurrency)
+			log.Info("This CR Pair Expected NumberOfPod", "EX_NUMBER_OF_PODS", fmt.Sprintf("%v", NumberOfPod))
+			log.Info("This CR Pair Expected Total Resources Usage", "EX_TOTAL_RESOURCES", fmt.Sprintf("%v", ThisCR_TotalResourcesUsage))
+			if ThisCR_TotalResourcesUsage < minimumCR_TotalResourcesUsage {
+				minimumCR_TotalResourcesUsage = ThisCR_TotalResourcesUsage
+				chosen_resourceLevel = resourceLevel + "m"
+				chosen_concurrency = concurrency
+			}
 		}
 	}
 
@@ -216,13 +245,67 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	//// Call KnativeServingClient to create new Service Revision by updating current service with new Configuration
 	NewServiceRevision, err := serving.Services("default").Update(ctx, NewServiceConfiguration, metav1.UpdateOptions{})
+	New_Revision_Number := ""
 	if err != nil {
 		log.Error(err, err.Error())
 	} else {
 		log.Info("New Service Revision Created", "SERVICE", NewServiceRevision.Name)
+		New_Revision_Number = NewServiceRevision.Status.LatestCreatedRevisionName
+		log.Info("New Service Revision Number", "REV_NUMBER", New_Revision_Number)
+	}
+
+	//// Watch New Revision, Wait until new Revision ready, delete old Revision and the corresponding pods (to handle previous Revision long Terminating pods time, which can hold a lot of worker node resources)
+	Newly_Created_Revision, err := serving.Revisions("default").Get(ctx, New_Revision_Number, metav1.GetOptions{})
+	if err != nil {
+		log.Error(err, err.Error())
+	}
+
+	for {
+		if !Newly_Created_Revision.IsReady() {
+			log.Info("Status NOT READY")
+			time.Sleep(1 * time.Second)
+			Newly_Created_Revision, err = serving.Revisions("default").Get(ctx, New_Revision_Number, metav1.GetOptions{})
+			if err != nil {
+				log.Error(err, err.Error())
+			}
+		} else {
+			log.Info("Status READY")
+			break
+		}
+	}
+
+	PodList := &corev1.PodList{}
+	if err := r.List(ctx, PodList); err != nil {
+		log.Error(err, err.Error())
+	} else {
+		count := 0
+		for _, pod := range PodList.Items {
+			if strings.HasPrefix(pod.Name, TargetService_Current_Revision) {
+				targetpod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: "default",
+						Name:      pod.Name,
+					},
+				}
+				count += 1
+				if count == 1 {
+					if err := serving.Revisions("default").Delete(ctx, TargetService_Current_Revision, metav1.DeleteOptions{}); err != nil {
+						log.Error(err, err.Error())
+					}
+					time.Sleep(2 * time.Second)
+				}
+
+				if err := r.Delete(ctx, targetpod, client.GracePeriodSeconds(0)); err != nil {
+					log.Error(err, err.Error())
+				} else {
+					log.Info("Delete pod ", "POD_NAME", pod.Name)
+				}
+			}
+		}
 	}
 
 	return ctrl.Result{}, nil
+
 }
 
 // SetupWithManager sets up the controller with the Manager.
