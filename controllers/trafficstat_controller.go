@@ -96,7 +96,7 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	TargetConfigMap := &corev1.ConfigMap{}
 	FetchConfigMapObjectKey := client.ObjectKey{
 		Namespace: "default",
-		Name:      CRDTargetServiceName,
+		Name:      "hybrid-" + CRDTargetServiceName,
 	}
 
 	if err := r.Get(ctx, FetchConfigMapObjectKey, TargetConfigMap); err != nil {
@@ -114,30 +114,32 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		log.Info("TargetService name from CRD is:", "SERVICE_NAME", CRDTargetServiceName)
 		log.Info("Found TargetService in cluster:", "SERVICE_NAME", TargetService.Name)
 	}
+
 	TargetService_Type := TargetConfigMap.Data["resources-intensive-type"]
 	TargetService_RequiredResources := TargetConfigMap.Data["required-resources"]
 	TargetService_Current_Revision := TargetService.Status.LatestReadyRevisionName
 	TargetService_Current_Pair_Concurrency := TargetService.Spec.Template.ObjectMeta.Annotations["autoscaling.knative.dev/target"]
 	TargetService_Current_Pair_Resources_Limit := TargetService.Spec.Template.Spec.Containers[0].Resources.Limits
 	TargetService_Current_Pair_Resources := ""
+
 	if TargetService_Type == "cpu" {
-		temp1 := strings.Split(fmt.Sprintf("abc", TargetService_Current_Pair_Resources_Limit["cpu"]), "=")
-		temp2 := strings.Split(temp1[1], " ")
+		temp1 := strings.Split(fmt.Sprintf("%v", TargetService_Current_Pair_Resources_Limit["cpu"]), "=")
+		temp2 := strings.Split(temp1[0], " ")
 		TargetService_Current_Pair_Resources = temp2[0][2:] + "m"
 	}
 	if TargetService_Type == "memory" {
-		temp1 := strings.Split(fmt.Sprintf("abc", TargetService_Current_Pair_Resources_Limit["memory"]), "=")
-		temp2 := strings.Split(temp1[1], " ")
+		temp1 := strings.Split(fmt.Sprintf("%v", TargetService_Current_Pair_Resources_Limit["memory"]), "=")
+		temp2 := strings.Split(temp1[0], " ")
 		temp3, err := strconv.Atoi(temp2[0][2:])
 		if err != nil {
 			log.Error(err, err.Error())
 		}
-		TargetService_Current_Pair_Resources = string(temp3/1048576) + "Mi"
+		TargetService_Current_Pair_Resources = strconv.Itoa(temp3/1048576) + "Mi"
 	}
 	log.Info("TargetService Type is", "TYPE", TargetService_Type)
 	log.Info("TargetService Required Resources is", "Required_RESOURCE", TargetService_RequiredResources)
-	log.Info("TargetService Current Pair-Concurrency is", "Pair_CONCURRENCY", TargetService_Current_Pair_Concurrency)
-	log.Info("TargetService Current Pair-Resources is", "Pair_RESOURCES", TargetService_Current_Pair_Resources)
+	log.Info("TargetService Current Pair-Concurrency is", "Current_Pair_CONCURRENCY", TargetService_Current_Pair_Concurrency)
+	log.Info("TargetService Current Pair-Resources is", "Current_Pair_RESOURCES", TargetService_Current_Pair_Resources)
 
 	//**Scaling Logic:
 	// If wanted service and CR ConfigMap (get from above) avaialble - NOT null:
@@ -150,6 +152,7 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 	var chosen_resourceLevel string
 	var chosen_concurrency string
+	var chosen_numberofpod string
 
 	for resourceLevel, concurrency := range TargetConfigMap.Data {
 		if resourceLevel != "resources-intensive-type" && resourceLevel != "required-resources" {
@@ -161,70 +164,89 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			if Rerr != nil {
 				log.Error(Rerr, Rerr.Error())
 			}
-			NumberOfPod := math.Round(ScalingInputTrafficFloat / ConcurrencyFloat)
+			NumberOfPod := math.Ceil(ScalingInputTrafficFloat / ConcurrencyFloat)
 			ThisCR_TotalResourcesUsage := NumberOfPod * resourceLevelFloat
 			log.Info("CR Pair", "CR_PAIR", resourceLevel+concurrency)
 			log.Info("This CR Pair Expected NumberOfPod", "EX_NUMBER_OF_PODS", fmt.Sprintf("%v", NumberOfPod))
 			log.Info("This CR Pair Expected Total Resources Usage", "EX_TOTAL_RESOURCES", fmt.Sprintf("%v", ThisCR_TotalResourcesUsage))
 			if ThisCR_TotalResourcesUsage < minimumCR_TotalResourcesUsage {
 				minimumCR_TotalResourcesUsage = ThisCR_TotalResourcesUsage
-				chosen_resourceLevel = resourceLevel + "m"
+				if TargetService_Type == "cpu" {
+					chosen_resourceLevel = resourceLevel + "m"
+				} else if TargetService_Type == "memory" {
+					chosen_resourceLevel = resourceLevel + "Mi"
+				}
 				chosen_concurrency = concurrency
+				chosen_numberofpod = strconv.FormatFloat(NumberOfPod, 'g', 1, 64)
 			}
 		}
 	}
 
-	log.Info("Chosen CR settings for Hybrid scaling is", "RESOURCE", chosen_resourceLevel)
-	log.Info("Chosen CR settings for Hybrid scaling is", "CONCURRENCY", chosen_concurrency)
+	//// Only Update Service to a new Revision/Configuration if the new calculated autoscaling settings (res-con) is DIFFERENT with the current one
+	if chosen_concurrency == TargetService_Current_Pair_Concurrency && chosen_resourceLevel == TargetService_Current_Pair_Resources {
+		log.Info("Keep current service res-con autoscaling setting")
+	} else {
 
-	//// Define Configuration Yaml Object
-	//// When a new Service is created, Knative assign for that Service an annotation "serving.knative.dev/creator" = The user that created the service.
-	//// In this experiment, the root user at k8s master node created --> serving.knative.dev/creator = kubernetes-admin
-	//// To be able to update a new Configuration for a Service, Knative-K8s requires 2 things:
-	//// - serving.knative.dev/creator must be the same one find on "kubectl describe ksvc <service-name>"'s Annotation
-	////  --> Add this to new Configuration's metadata/annotations
-	//// - New Configuration ResourceVersion must be the same with the current one.
-	////  ---> GetResourceVersion() of current service, set it to the new one.
-	////  ---> This line below do that "configuration.SetResourceVersion(service.GetResourceVersion())"
-	NewServiceConfiguration := &servingv1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      CRDTargetServiceName,
-			Namespace: "default",
-			Labels: map[string]string{
-				"app": CRDTargetServiceName,
-			},
-			Annotations: map[string]string{
-				"serving.knative.dev/creator": "kubernetes-admin",
-			},
-		},
-		Spec: servingv1.ServiceSpec{
-			ConfigurationSpec: servingv1.ConfigurationSpec{
-				Template: servingv1.RevisionTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{
-						Labels: map[string]string{
-							"app": CRDTargetServiceName,
-						},
-						Annotations: map[string]string{
-							"autoscaling.knative.dev/target": chosen_concurrency,
-						},
+		log.Info("Chosen CR settings for Hybrid scaling is", "RESOURCE", chosen_resourceLevel)
+		log.Info("Chosen CR settings for Hybrid scaling is", "CONCURRENCY", chosen_concurrency)
+		log.Info("Chosen CR settings for Hybrid scaling is", "NUMBEROFPOD", chosen_numberofpod)
+
+		//// Define Configuration Yaml Object
+		//// When a new Service is created, Knative assign for that Service an annotation "serving.knative.dev/creator" = The user that created the service.
+		//// In this experiment, the root user at k8s master node created --> serving.knative.dev/creator = kubernetes-admin
+		//// To be able to update a new Configuration for a Service, Knative-K8s requires 2 things:
+		//// - serving.knative.dev/creator must be the same one find on "kubectl describe ksvc <service-name>"'s Annotation
+		////  --> Add this to new Configuration's metadata/annotations
+		//// - New Configuration ResourceVersion must be the same with the current one.
+		////  ---> GetResourceVersion() of current service, set it to the new one.
+		////  ---> This line below do that "configuration.SetResourceVersion(service.GetResourceVersion())"
+		var NewServiceConfiguration *servingv1.Service
+
+		if TargetService_Type == "cpu" {
+
+			NewServiceConfiguration = &servingv1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      CRDTargetServiceName,
+					Namespace: "default",
+					Labels: map[string]string{
+						"app": CRDTargetServiceName,
 					},
-					Spec: servingv1.RevisionSpec{
-						PodSpec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name:  CRDTargetServiceName,
-									Image: "vudinhdai2505/test-app:v5",
-									Resources: corev1.ResourceRequirements{
-										Requests: map[corev1.ResourceName]resource.Quantity{
-											"cpu": resource.MustParse(chosen_resourceLevel),
-										},
-										Limits: map[corev1.ResourceName]resource.Quantity{
-											"cpu": resource.MustParse(chosen_resourceLevel),
-										},
-									},
-									Ports: []corev1.ContainerPort{
+					Annotations: map[string]string{
+						"serving.knative.dev/creator": "kubernetes-admin",
+					},
+				},
+				Spec: servingv1.ServiceSpec{
+					ConfigurationSpec: servingv1.ConfigurationSpec{
+						Template: servingv1.RevisionTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{
+								Labels: map[string]string{
+									"app": CRDTargetServiceName,
+								},
+								Annotations: map[string]string{
+									"autoscaling.knative.dev/target":        chosen_concurrency,
+									"autoscaling.knative.dev/initial-scale": chosen_numberofpod,
+								},
+							},
+							Spec: servingv1.RevisionSpec{
+								PodSpec: corev1.PodSpec{
+									Containers: []corev1.Container{
 										{
-											ContainerPort: 5000,
+											Name:  CRDTargetServiceName,
+											Image: "vudinhdai2505/test-app:v5",
+											Resources: corev1.ResourceRequirements{
+												Requests: map[corev1.ResourceName]resource.Quantity{
+													"memory": resource.MustParse(TargetService_RequiredResources),
+												},
+												Limits: map[corev1.ResourceName]resource.Quantity{
+													"cpu":    resource.MustParse(chosen_resourceLevel),
+													"memory": resource.MustParse(TargetService_RequiredResources),
+												},
+											},
+											Ports: []corev1.ContainerPort{
+												{
+													ContainerPort: 5000,
+												},
+											},
 										},
 									},
 								},
@@ -232,73 +254,151 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 						},
 					},
 				},
-			},
-		},
-	}
-
-	log.Info("Creating new Configuration for service ", "SERVICE_NAME", CRDTargetServiceName)
-	log.Info("with chosen settings ", "CHOSEN_RESOURCE_LEVEL", chosen_resourceLevel)
-	log.Info("with chosen settings ", "CHOSEN_RESOURCE_LEVEL", chosen_concurrency)
-
-	//// Set ResourceVersion of new Configuration to the current Service's ResourceVersion (Required for Update)
-	NewServiceConfiguration.SetResourceVersion(TargetService.GetResourceVersion())
-
-	//// Call KnativeServingClient to create new Service Revision by updating current service with new Configuration
-	NewServiceRevision, err := serving.Services("default").Update(ctx, NewServiceConfiguration, metav1.UpdateOptions{})
-	New_Revision_Number := ""
-	if err != nil {
-		log.Error(err, err.Error())
-	} else {
-		log.Info("New Service Revision Created", "SERVICE", NewServiceRevision.Name)
-		New_Revision_Number = NewServiceRevision.Status.LatestCreatedRevisionName
-		log.Info("New Service Revision Number", "REV_NUMBER", New_Revision_Number)
-	}
-
-	//// Watch New Revision, Wait until new Revision ready, delete old Revision and the corresponding pods (to handle previous Revision long Terminating pods time, which can hold a lot of worker node resources)
-	Newly_Created_Revision, err := serving.Revisions("default").Get(ctx, New_Revision_Number, metav1.GetOptions{})
-	if err != nil {
-		log.Error(err, err.Error())
-	}
-
-	for {
-		if !Newly_Created_Revision.IsReady() {
-			log.Info("Status NOT READY")
-			time.Sleep(1 * time.Second)
-			Newly_Created_Revision, err = serving.Revisions("default").Get(ctx, New_Revision_Number, metav1.GetOptions{})
-			if err != nil {
-				log.Error(err, err.Error())
 			}
-		} else {
-			log.Info("Status READY")
-			break
-		}
-	}
 
-	PodList := &corev1.PodList{}
-	if err := r.List(ctx, PodList); err != nil {
-		log.Error(err, err.Error())
-	} else {
-		count := 0
-		for _, pod := range PodList.Items {
-			if strings.HasPrefix(pod.Name, TargetService_Current_Revision) {
-				targetpod := &corev1.Pod{
-					ObjectMeta: metav1.ObjectMeta{
-						Namespace: "default",
-						Name:      pod.Name,
+		} else if TargetService_Type == "memory" {
+
+			NewServiceConfiguration = &servingv1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      CRDTargetServiceName,
+					Namespace: "default",
+					Labels: map[string]string{
+						"app": CRDTargetServiceName,
 					},
-				}
-				count += 1
-				if count == 1 {
-					if err := serving.Revisions("default").Delete(ctx, TargetService_Current_Revision, metav1.DeleteOptions{}); err != nil {
-						log.Error(err, err.Error())
-					}
-					time.Sleep(2 * time.Second)
-				}
+					Annotations: map[string]string{
+						"serving.knative.dev/creator": "kubernetes-admin",
+					},
+				},
+				Spec: servingv1.ServiceSpec{
+					ConfigurationSpec: servingv1.ConfigurationSpec{
+						Template: servingv1.RevisionTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{
+								Labels: map[string]string{
+									"app": CRDTargetServiceName,
+								},
+								Annotations: map[string]string{
+									"autoscaling.knative.dev/target":        chosen_concurrency,
+									"autoscaling.knative.dev/initial-scale": chosen_numberofpod,
+								},
+							},
+							Spec: servingv1.RevisionSpec{
+								PodSpec: corev1.PodSpec{
+									Containers: []corev1.Container{
+										{
+											Name:  CRDTargetServiceName,
+											Image: "vudinhdai2505/test-app:v5",
+											Resources: corev1.ResourceRequirements{
+												Requests: map[corev1.ResourceName]resource.Quantity{
+													"cpu": resource.MustParse(TargetService_RequiredResources),
+												},
+												Limits: map[corev1.ResourceName]resource.Quantity{
+													"cpu":    resource.MustParse(TargetService_RequiredResources),
+													"memory": resource.MustParse(chosen_resourceLevel),
+												},
+											},
+											Ports: []corev1.ContainerPort{
+												{
+													ContainerPort: 5000,
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+		}
 
-				if err := r.Delete(ctx, targetpod, client.GracePeriodSeconds(0)); err != nil {
-					log.Error(err, err.Error())
-				} else {
-					log.Info("Delete pod ", "POD_NAME", pod.Name)
+		log.Info("Creating new Configuration for service ", "SERVICE_NAME", CRDTargetServiceName)
+		log.Info("with chosen settings ", "CHOSEN_RESOURCE_LEVEL", chosen_resourceLevel)
+		log.Info("with chosen settings ", "CHOSEN_RESOURCE_LEVEL", chosen_concurrency)
+
+		//// Set ResourceVersion of new Configuration to the current Service's ResourceVersion (Required for Update)
+		NewServiceConfiguration.SetResourceVersion(TargetService.GetResourceVersion())
+
+		//// Call KnativeServingClient to create new Service Revision by updating current service with new Configuration
+		NewServiceRevision, err := serving.Services("default").Update(ctx, NewServiceConfiguration, metav1.UpdateOptions{})
+
+		// New Revision Number = current + 1 (from service-00009 to service-00010) (Below are string processing to get the new Revision ID/Number)
+		tempstring := strings.Split(TargetService_Current_Revision, "-")
+		tempint, _ := strconv.Atoi(tempstring[len(tempstring)-1])
+		rev_number := strconv.Itoa(tempint + 1)
+		New_Revision_Number := CRDTargetServiceName + "-" + strings.Repeat("0", 5-len(rev_number)) + rev_number
+		if err != nil {
+			log.Error(err, err.Error())
+		} else {
+			log.Info("New Service Revision Created", "SERVICE", NewServiceRevision.Name)
+			log.Info("New Service Revision Number", "REV_NUMBER", New_Revision_Number)
+		}
+
+		//// Watch New Revision,
+		//// Wait until new Revision ready (Pod Running)
+		//// Delete old Revision and the corresponding pods (to handle previous Revision long Terminating pods time, which can hold a lot of worker node resources)
+
+		// While Loop to wait until New Revision Pod Ready to serve
+		for {
+			BeforeDeleteRevisionPodList := &corev1.PodList{}
+			if err := r.List(ctx, BeforeDeleteRevisionPodList); err != nil {
+				log.Error(err, err.Error())
+				break
+			}
+			count := 0
+			newPodDeploy := false
+			for _, pod := range BeforeDeleteRevisionPodList.Items {
+				if strings.HasPrefix(pod.Name, New_Revision_Number) {
+					newPodDeploy = true
+				}
+				if strings.HasPrefix(pod.Name, New_Revision_Number) && pod.Status.Phase != "Running" {
+					newPodDeploy = false // New Pod Not Ready, keep previous Revision alive
+					count += 1
+				}
+			}
+			if count == 0 || !newPodDeploy {
+				log.Info("New Revision Pod NOT READY")
+			} else { // only when New Revision Pod Ready, process to Delete Previous Revision Pods step
+				log.Info("New Revision Pod Running")
+				break
+			}
+		}
+
+		log.Info("Wait")
+		time.Sleep(5 * time.Second)
+
+		// New Revision Pods are READY now, Delete old Revision and old Revision pods
+		// Check if old Revision Pods are still Terminating. If YES delete old Revision, Then Delete pod
+		ReadyDeleteRevisionPodList := &corev1.PodList{}
+		if err := r.List(ctx, ReadyDeleteRevisionPodList); err != nil {
+			log.Error(err, err.Error())
+		} else {
+			count := 0 // count to ensure Delete Revision is only called one time in the PodList loop (when count = 1)
+			for _, pod := range ReadyDeleteRevisionPodList.Items {
+				if strings.HasPrefix(pod.Name, TargetService_Current_Revision) {
+					targetpod := &corev1.Pod{
+						ObjectMeta: metav1.ObjectMeta{
+							Namespace: "default",
+							Name:      pod.Name,
+						},
+					}
+					count += 1
+					if count == 1 {
+						log.Info("Ask to delete Revision", "REVISION_NAME", TargetService_Current_Revision)
+
+						err := serving.Revisions("default").Delete(context.Background(), TargetService_Current_Revision, metav1.DeleteOptions{})
+						if err != nil {
+							log.Error(err, err.Error())
+						} else {
+							log.Info("Delete Revision ", "REVISION_NAME", TargetService_Current_Revision)
+						}
+						time.Sleep(2 * time.Second)
+					}
+
+					if err := r.Delete(ctx, targetpod, client.GracePeriodSeconds(0)); err != nil {
+						log.Error(err, err.Error())
+					} else {
+						log.Info("Delete pod ", "POD_NAME", pod.Name)
+					}
 				}
 			}
 		}
