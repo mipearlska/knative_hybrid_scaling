@@ -347,12 +347,11 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			count := 0
 			newPodDeploy := false
 			for _, pod := range BeforeDeleteRevisionPodList.Items {
-				if strings.HasPrefix(pod.Name, New_Revision_Number) {
-					newPodDeploy = true
-				}
-				if strings.HasPrefix(pod.Name, New_Revision_Number) && pod.Status.Phase != "Running" {
-					newPodDeploy = false // New Pod Not Ready, keep previous Revision alive
+				if strings.HasPrefix(pod.Name, New_Revision_Number) && pod.Status.Phase == "Running" {
+					newPodDeploy = true // New Pod Not Ready, keep previous Revision alive
 					count += 1
+				} else if strings.HasPrefix(pod.Name, New_Revision_Number) && pod.Status.Phase != "Running" {
+					newPodDeploy = false
 				}
 			}
 			if count == 0 || !newPodDeploy {
