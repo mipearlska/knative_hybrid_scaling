@@ -125,7 +125,11 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if TargetService_Type == "cpu" {
 		temp1 := strings.Split(fmt.Sprintf("%v", TargetService_Current_Pair_Resources_Limit["cpu"]), "=")
 		temp2 := strings.Split(temp1[0], " ")
-		TargetService_Current_Pair_Resources = temp2[0][2:] + "m"
+		temp3 := temp2[0][2:]
+		if len(temp3) == 1 {
+			temp3 = temp3 + "000"
+		}
+		TargetService_Current_Pair_Resources = temp3 + "m"
 	}
 	if TargetService_Type == "memory" {
 		temp1 := strings.Split(fmt.Sprintf("%v", TargetService_Current_Pair_Resources_Limit["memory"]), "=")
@@ -212,7 +216,8 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 						"app": CRDTargetServiceName,
 					},
 					Annotations: map[string]string{
-						"serving.knative.dev/creator": "kubernetes-admin",
+						"serving.knative.dev/creator":      "kubernetes-admin",
+						"serving.knative.dev/lastModifier": "kubernetes-admin",
 					},
 				},
 				Spec: servingv1.ServiceSpec{
@@ -266,7 +271,8 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 						"app": CRDTargetServiceName,
 					},
 					Annotations: map[string]string{
-						"serving.knative.dev/creator": "kubernetes-admin",
+						"serving.knative.dev/creator":      "kubernetes-admin",
+						"serving.knative.dev/lastModifier": "kubernetes-admin",
 					},
 				},
 				Spec: servingv1.ServiceSpec{
@@ -331,72 +337,73 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		} else {
 			log.Info("New Service Revision Created", "SERVICE", NewServiceRevision.Name)
 			log.Info("New Service Revision Number", "REV_NUMBER", New_Revision_Number)
-		}
 
-		//// Watch New Revision,
-		//// Wait until new Revision ready (Pod Running)
-		//// Delete old Revision and the corresponding pods (to handle previous Revision long Terminating pods time, which can hold a lot of worker node resources)
+			//// Watch New Revision,
+			//// Wait until new Revision ready (Pod Running)
+			//// Delete old Revision and the corresponding pods (to handle previous Revision long Terminating pods time, which can hold a lot of worker node resources)
 
-		// While Loop to wait until New Revision Pod Ready to serve
-		for {
-			BeforeDeleteRevisionPodList := &corev1.PodList{}
-			if err := r.List(ctx, BeforeDeleteRevisionPodList); err != nil {
-				log.Error(err, err.Error())
-				break
-			}
-			count := 0
-			newPodDeploy := false
-			for _, pod := range BeforeDeleteRevisionPodList.Items {
-				if strings.HasPrefix(pod.Name, New_Revision_Number) && pod.Status.Phase == "Running" {
-					newPodDeploy = true // New Pod Not Ready, keep previous Revision alive
-					count += 1
-				} else if strings.HasPrefix(pod.Name, New_Revision_Number) && pod.Status.Phase != "Running" {
-					newPodDeploy = false
+			// While Loop to wait until New Revision Pod Ready to serve
+			for {
+				time.Sleep(1 * time.Second)
+				BeforeDeleteRevisionPodList := &corev1.PodList{}
+				if err := r.List(ctx, BeforeDeleteRevisionPodList); err != nil {
+					log.Error(err, err.Error())
+					break
+				}
+				count := 0
+				newPodDeploy := false
+				for _, pod := range BeforeDeleteRevisionPodList.Items {
+					if strings.HasPrefix(pod.Name, New_Revision_Number) && pod.Status.Phase == "Running" {
+						newPodDeploy = true // New Pod Not Ready, keep previous Revision alive
+						count += 1
+					} else if strings.HasPrefix(pod.Name, New_Revision_Number) && pod.Status.Phase != "Running" {
+						newPodDeploy = false
+					}
+				}
+				if count == 0 || !newPodDeploy {
+					log.Info("New Revision Pod NOT READY", "REV_NUMBER", New_Revision_Number)
+				} else { // only when New Revision Pod Ready, process to Delete Previous Revision Pods step
+					log.Info("New Revision Pod Running")
+					break
 				}
 			}
-			if count == 0 || !newPodDeploy {
-				log.Info("New Revision Pod NOT READY")
-			} else { // only when New Revision Pod Ready, process to Delete Previous Revision Pods step
-				log.Info("New Revision Pod Running")
-				break
-			}
-		}
 
-		log.Info("Wait")
-		time.Sleep(5 * time.Second)
+			log.Info("Wait")
+			time.Sleep(5 * time.Second)
 
-		// New Revision Pods are READY now, Delete old Revision and old Revision pods
-		// Check if old Revision Pods are still Terminating. If YES delete old Revision, Then Delete pod
-		ReadyDeleteRevisionPodList := &corev1.PodList{}
-		if err := r.List(ctx, ReadyDeleteRevisionPodList); err != nil {
-			log.Error(err, err.Error())
-		} else {
-			count := 0 // count to ensure Delete Revision is only called one time in the PodList loop (when count = 1)
-			for _, pod := range ReadyDeleteRevisionPodList.Items {
-				if strings.HasPrefix(pod.Name, TargetService_Current_Revision) {
-					targetpod := &corev1.Pod{
-						ObjectMeta: metav1.ObjectMeta{
-							Namespace: "default",
-							Name:      pod.Name,
-						},
-					}
-					count += 1
-					if count == 1 {
-						log.Info("Ask to delete Revision", "REVISION_NAME", TargetService_Current_Revision)
+			// New Revision Pods are READY now, Delete old Revision and old Revision pods
+			// Check if old Revision Pods are still Terminating. If YES delete old Revision, Then Delete pod
+			ReadyDeleteRevisionPodList := &corev1.PodList{}
+			if err := r.List(ctx, ReadyDeleteRevisionPodList); err != nil {
+				log.Error(err, err.Error())
+			} else {
+				count := 0 // count to ensure Delete Revision is only called one time in the PodList loop (when count = 1)
+				for _, pod := range ReadyDeleteRevisionPodList.Items {
+					if strings.HasPrefix(pod.Name, TargetService_Current_Revision) {
+						targetpod := &corev1.Pod{
+							ObjectMeta: metav1.ObjectMeta{
+								Namespace: "default",
+								Name:      pod.Name,
+							},
+						}
+						count += 1
+						if count == 1 {
+							log.Info("Ask to delete Revision", "REVISION_NAME", TargetService_Current_Revision)
 
-						err := serving.Revisions("default").Delete(context.Background(), TargetService_Current_Revision, metav1.DeleteOptions{})
-						if err != nil {
+							err := serving.Revisions("default").Delete(context.Background(), TargetService_Current_Revision, metav1.DeleteOptions{})
+							if err != nil {
+								log.Error(err, err.Error())
+							} else {
+								log.Info("Delete Revision ", "REVISION_NAME", TargetService_Current_Revision)
+							}
+							time.Sleep(2 * time.Second)
+						}
+
+						if err := r.Delete(ctx, targetpod, client.GracePeriodSeconds(0)); err != nil {
 							log.Error(err, err.Error())
 						} else {
-							log.Info("Delete Revision ", "REVISION_NAME", TargetService_Current_Revision)
+							log.Info("Delete pod ", "POD_NAME", pod.Name)
 						}
-						time.Sleep(2 * time.Second)
-					}
-
-					if err := r.Delete(ctx, targetpod, client.GracePeriodSeconds(0)); err != nil {
-						log.Error(err, err.Error())
-					} else {
-						log.Info("Delete pod ", "POD_NAME", pod.Name)
 					}
 				}
 			}
