@@ -22,6 +22,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -231,6 +232,7 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 								Annotations: map[string]string{
 									"autoscaling.knative.dev/target":        chosen_concurrency,
 									"autoscaling.knative.dev/initial-scale": chosen_numberofpod,
+									"autoscaling.knative.dev/min-scale":     chosen_numberofpod,
 								},
 							},
 							Spec: servingv1.RevisionSpec{
@@ -286,6 +288,7 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 								Annotations: map[string]string{
 									"autoscaling.knative.dev/target":        chosen_concurrency,
 									"autoscaling.knative.dev/initial-scale": chosen_numberofpod,
+									"autoscaling.knative.dev/min-scale":     chosen_numberofpod,
 								},
 							},
 							Spec: servingv1.RevisionSpec{
@@ -339,9 +342,9 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			log.Info("New Service Revision Created", "SERVICE", NewServiceRevision.Name)
 			log.Info("New Service Revision Number", "REV_NUMBER", New_Revision_Number)
 
-			//// Watch New Revision,
-			//// Wait until new Revision ready (Pod Running)
-			//// Delete old Revision and the corresponding pods (to handle previous Revision long Terminating pods time, which can hold a lot of worker node resources)
+			// Watch New Revision,
+			// Wait until new Revision ready (Pod Running)
+			// Delete old Revision and the corresponding pods (to handle previous Revision long Terminating pods time, which can hold a lot of worker node resources)
 
 			// While Loop to wait until New Revision Pod Ready to serve
 			for {
