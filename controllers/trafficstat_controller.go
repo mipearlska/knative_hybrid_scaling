@@ -168,6 +168,7 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			if Rerr != nil {
 				log.Error(Rerr, Rerr.Error())
 			}
+			ConcurrencyFloat = ConcurrencyFloat * 0.7 //KNative Default Target Concurrency Percentage = 70%
 			NumberOfPod := math.Ceil(ScalingInputTrafficFloat / ConcurrencyFloat)
 			ThisCR_TotalResourcesUsage := NumberOfPod * resourceLevelFloat
 			log.Info("CR Pair", "CR_PAIR", resourceLevel+concurrency)
