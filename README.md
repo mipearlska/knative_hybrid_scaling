@@ -79,7 +79,7 @@ make run
 
 7. Start Traffic Prediction Service (refer to https://github.com/mipearlska/Predictive_TrafficStatCRD for installation and running guide)
 - This service might take up until 1 minute to start up (loading libraries, etc.)
-- Recommend Running flow: Start Prediction service (running python3 main.py) at 0:40, Start Traffic Generation at 1:00
+- Recommended Running flow: Start Prediction service (running python3 main.py) at 0:40, Start Traffic Generation at 1:00
 - First Prediction will happen at 1:55, at 0:55 the Prediction service is still starting up
 - If your system startup the Prediction service fast, delay the Start Prediction service time to a later second (<55)
 - Reason: Prediction Service up before 0:55, first prediction happen at 0:55 while the traffic has not been generated yet (scheduled to start at 1:00)
