@@ -1,0 +1,29 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: deploy-a
+  namespace: default
+  labels:
+    app: deploy-a
+spec:
+  template:
+    metadata:
+      labels:
+        app: deploy-a
+      annotations:
+        autoscaling.knative.dev/target: "30"
+        autoscaling.knative.dev/initial-scale: "2"
+        autoscaling.knative.dev/min-scale: "2"
+    spec:
+      containers:
+      - name: deploy-a
+        image: vudinhdai2505/test-app:v5
+        resources:
+          requests:
+            memory: "200Mi"
+            #cpu: "3000m"
+          limits:
+            memory: "200Mi"
+            cpu: "3000m"
+        ports:
+        - containerPort: 5000

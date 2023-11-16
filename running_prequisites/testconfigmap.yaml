@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hybrid-deploy-a
+data:
+  resources-intensive-type: "cpu"
+  required-resources: "200Mi"
+  "1000": "6"
+  "1500": "10"
+  "2000": "15"
+  "2500": "20"
+  "3000": "30"
+  "3500": "40"
+  "4000": "50"
