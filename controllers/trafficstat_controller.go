@@ -42,6 +42,10 @@ import (
 	hybridscalingv1 "github.com/mipearlska/knative_hybrid_scaling/api/v1"
 )
 
+var (
+	loggerSD = ctrl.Log.WithName("ControllerLOG")
+)
+
 // TrafficStatReconciler reconciles a TrafficStat object
 type TrafficStatReconciler struct {
 	client.Client
@@ -71,10 +75,10 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// Get the TrafficStat resource that trigger the reconciliation request
 	var TrafficStatCRD = hybridscalingv1.TrafficStat{}
 	if err := r.Get(ctx, req.NamespacedName, &TrafficStatCRD); err != nil {
-		log.Error(err, "unable to fetch client")
+		loggerSD.Error(err, "unable to fetch client")
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	} else {
-		log.Info("Fetched TrafficStatCRD, target service is: ", "TARGET_SERVICE", TrafficStatCRD.Spec.ServiceName)
+		loggerSD.Info("Fetched TrafficStatCRD, target service is: ", "TARGET_SERVICE", TrafficStatCRD.Spec.ServiceName)
 	}
 	// Store Wanted/Target ServiceName from CRD in TargetServiceName variable
 	CRDTargetServiceName := TrafficStatCRD.Spec.ServiceName
@@ -85,12 +89,12 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	config, err := clientcmd.BuildConfigFromFlags("", "/root/.kube/config")
 	if err != nil {
-		log.Error(err, "unable to BuildConfigFromFlags using clientcmd")
+		loggerSD.Error(err, "unable to BuildConfigFromFlags using clientcmd")
 	}
 
 	serving, err := servingv1client.NewForConfig(config)
 	if err != nil {
-		log.Error(err, "unable to create Knative Serving Go Client")
+		loggerSD.Error(err, "unable to create Knative Serving Go Client")
 	}
 
 	//**Get Service's Concurrency-Resources ConfigMap (CR ConfigMap) with name == TrafficStatCRD.spec.servicename
@@ -101,19 +105,19 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	if err := r.Get(ctx, FetchConfigMapObjectKey, TargetConfigMap); err != nil {
-		log.Error(err, "unable to fetch ConfigMap corresponding to CRDTargetService")
+		loggerSD.Error(err, "unable to fetch ConfigMap corresponding to CRDTargetService")
 	} else {
-		log.Info("Fetch ConfigMap sucessful:", "CONFIG_MAP-NAME", TargetConfigMap.Name)
+		loggerSD.Info("Fetch ConfigMap sucessful:", "CONFIG_MAP-NAME", TargetConfigMap.Name)
 	}
 
 	//**Get Service with name == TrafficStatCRD.spec.servicename
 	TargetService, err := serving.Services("default").Get(ctx, CRDTargetServiceName, metav1.GetOptions{})
 	if err != nil {
-		log.Info("TargetService name from CRD is:", "SERVICE_NAME", CRDTargetServiceName)
-		log.Error(err, "TargetService from CRD is not available in cluster")
+		loggerSD.Info("TargetService name from CRD is:", "SERVICE_NAME", CRDTargetServiceName)
+		loggerSD.Error(err, "TargetService from CRD is not available in cluster")
 	} else {
-		log.Info("TargetService name from CRD is:", "SERVICE_NAME", CRDTargetServiceName)
-		log.Info("Found TargetService in cluster:", "SERVICE_NAME", TargetService.Name)
+		loggerSD.Info("TargetService name from CRD is:", "SERVICE_NAME", CRDTargetServiceName)
+		loggerSD.Info("Found TargetService in cluster:", "SERVICE_NAME", TargetService.Name)
 	}
 
 	TargetService_Type := TargetConfigMap.Data["resources-intensive-type"]
@@ -137,14 +141,14 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		temp2 := strings.Split(temp1[0], " ")
 		temp3, err := strconv.Atoi(temp2[0][2:])
 		if err != nil {
-			log.Error(err, err.Error())
+			loggerSD.Error(err, err.Error())
 		}
 		TargetService_Current_Pair_Resources = strconv.Itoa(temp3/1048576) + "Mi"
 	}
-	log.Info("TargetService Type is", "TYPE", TargetService_Type)
-	log.Info("TargetService Required Resources is", "Required_RESOURCE", TargetService_RequiredResources)
-	log.Info("TargetService Current Pair-Concurrency is", "Current_Pair_CONCURRENCY", TargetService_Current_Pair_Concurrency)
-	log.Info("TargetService Current Pair-Resources is", "Current_Pair_RESOURCES", TargetService_Current_Pair_Resources)
+	loggerSD.Info("TargetService Type is", "TYPE", TargetService_Type)
+	loggerSD.Info("TargetService Required Resources is", "Required_RESOURCE", TargetService_RequiredResources)
+	loggerSD.Info("TargetService Current Pair-Concurrency is", "Current_Pair_CONCURRENCY", TargetService_Current_Pair_Concurrency)
+	loggerSD.Info("TargetService Current Pair-Resources is", "Current_Pair_RESOURCES", TargetService_Current_Pair_Resources)
 
 	//**Scaling Logic:
 	// If wanted service and CR ConfigMap (get from above) avaialble - NOT null:
@@ -153,7 +157,7 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	minimumCR_TotalResourcesUsage := float64(100000000)
 	ScalingInputTrafficFloat, err := strconv.ParseFloat(TrafficStatCRD.Spec.ScalingInputTraffic, 64)
 	if err != nil {
-		log.Error(err, err.Error())
+		loggerSD.Error(err, err.Error())
 	}
 	var chosen_resourceLevel string
 	var chosen_concurrency string
@@ -163,18 +167,18 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		if resourceLevel != "resources-intensive-type" && resourceLevel != "required-resources" {
 			ConcurrencyFloat, Cerr := strconv.ParseFloat(concurrency, 64)
 			if Cerr != nil {
-				log.Error(Cerr, Cerr.Error())
+				loggerSD.Error(Cerr, Cerr.Error())
 			}
 			resourceLevelFloat, Rerr := strconv.ParseFloat(resourceLevel, 64)
 			if Rerr != nil {
-				log.Error(Rerr, Rerr.Error())
+				loggerSD.Error(Rerr, Rerr.Error())
 			}
 			ConcurrencyFloat = ConcurrencyFloat * 0.7 //KNative Default Target Concurrency Percentage = 70%
 			NumberOfPod := math.Ceil(ScalingInputTrafficFloat / ConcurrencyFloat)
 			ThisCR_TotalResourcesUsage := NumberOfPod * resourceLevelFloat
-			log.Info("CR Pair", "CR_PAIR", resourceLevel+concurrency)
-			log.Info("This CR Pair Expected NumberOfPod", "EX_NUMBER_OF_PODS", fmt.Sprintf("%v", NumberOfPod))
-			log.Info("This CR Pair Expected Total Resources Usage", "EX_TOTAL_RESOURCES", fmt.Sprintf("%v", ThisCR_TotalResourcesUsage))
+			loggerSD.Info("CR Pair", "CR_PAIR", resourceLevel+concurrency)
+			loggerSD.Info("This CR Pair Expected NumberOfPod", "EX_NUMBER_OF_PODS", fmt.Sprintf("%v", NumberOfPod))
+			loggerSD.Info("This CR Pair Expected Total Resources Usage", "EX_TOTAL_RESOURCES", fmt.Sprintf("%v", ThisCR_TotalResourcesUsage))
 			if ThisCR_TotalResourcesUsage < minimumCR_TotalResourcesUsage {
 				minimumCR_TotalResourcesUsage = ThisCR_TotalResourcesUsage
 				if TargetService_Type == "cpu" {
@@ -190,12 +194,12 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	//// Only Update Service to a new Revision/Configuration if the new calculated autoscaling settings (res-con) is DIFFERENT with the current one
 	if chosen_concurrency == TargetService_Current_Pair_Concurrency && chosen_resourceLevel == TargetService_Current_Pair_Resources {
-		log.Info("Keep current service res-con autoscaling setting")
+		loggerSD.Info("Keep current service res-con autoscaling setting")
 	} else {
 
-		log.Info("Chosen CR settings for Hybrid scaling is", "RESOURCE", chosen_resourceLevel)
-		log.Info("Chosen CR settings for Hybrid scaling is", "CONCURRENCY", chosen_concurrency)
-		log.Info("Chosen CR settings for Hybrid scaling is", "NUMBEROFPOD", chosen_numberofpod)
+		loggerSD.Info("Chosen CR settings for Hybrid scaling is", "RESOURCE", chosen_resourceLevel)
+		loggerSD.Info("Chosen CR settings for Hybrid scaling is", "CONCURRENCY", chosen_concurrency)
+		loggerSD.Info("Chosen CR settings for Hybrid scaling is", "NUMBEROFPOD", chosen_numberofpod)
 
 		//// Define Configuration Yaml Object
 		//// When a new Service is created, Knative assign for that Service an annotation "serving.knative.dev/creator" = The user that created the service.
@@ -321,9 +325,9 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			}
 		}
 
-		log.Info("Creating new Configuration for service ", "SERVICE_NAME", CRDTargetServiceName)
-		log.Info("with chosen settings ", "CHOSEN_RESOURCE_LEVEL", chosen_resourceLevel)
-		log.Info("with chosen settings ", "CHOSEN_RESOURCE_LEVEL", chosen_concurrency)
+		loggerSD.Info("Creating new Configuration for service ", "SERVICE_NAME", CRDTargetServiceName)
+		loggerSD.Info("with chosen settings ", "CHOSEN_RESOURCE_LEVEL", chosen_resourceLevel)
+		loggerSD.Info("with chosen settings ", "CHOSEN_RESOURCE_LEVEL", chosen_concurrency)
 
 		//// Set ResourceVersion of new Configuration to the current Service's ResourceVersion (Required for Update)
 		NewServiceConfiguration.SetResourceVersion(TargetService.GetResourceVersion())
@@ -337,10 +341,10 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		rev_number := strconv.Itoa(tempint + 1)
 		New_Revision_Number := CRDTargetServiceName + "-" + strings.Repeat("0", 5-len(rev_number)) + rev_number
 		if err != nil {
-			log.Error(err, err.Error())
+			loggerSD.Error(err, err.Error())
 		} else {
-			log.Info("New Service Revision Created", "SERVICE", NewServiceRevision.Name)
-			log.Info("New Service Revision Number", "REV_NUMBER", New_Revision_Number)
+			loggerSD.Info("New Service Revision Created", "SERVICE", NewServiceRevision.Name)
+			loggerSD.Info("New Service Revision Number", "REV_NUMBER", New_Revision_Number)
 
 			// Watch New Revision,
 			// Wait until new Revision ready (Pod Running)
@@ -351,7 +355,7 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				time.Sleep(1 * time.Second)
 				BeforeDeleteRevisionPodList := &corev1.PodList{}
 				if err := r.List(ctx, BeforeDeleteRevisionPodList); err != nil {
-					log.Error(err, err.Error())
+					loggerSD.Error(err, err.Error())
 					break
 				}
 				count := 0
@@ -365,21 +369,21 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 					}
 				}
 				if count == 0 || !newPodDeploy {
-					log.Info("New Revision Pod NOT READY", "REV_NUMBER", New_Revision_Number)
+					loggerSD.Info("New Revision Pod NOT READY", "REV_NUMBER", New_Revision_Number)
 				} else { // only when New Revision Pod Ready, process to Delete Previous Revision Pods step
-					log.Info("New Revision Pod Running")
+					loggerSD.Info("New Revision Pod Running")
 					break
 				}
 			}
 
-			log.Info("Wait")
+			loggerSD.Info("Wait")
 			time.Sleep(5 * time.Second)
 
 			// New Revision Pods are READY now, Delete old Revision and old Revision pods
 			// Check if old Revision Pods are still Terminating. If YES delete old Revision, Then Delete pod
 			ReadyDeleteRevisionPodList := &corev1.PodList{}
 			if err := r.List(ctx, ReadyDeleteRevisionPodList); err != nil {
-				log.Error(err, err.Error())
+				loggerSD.Error(err, err.Error())
 			} else {
 				count := 0 // count to ensure Delete Revision is only called one time in the PodList loop (when count = 1)
 				for _, pod := range ReadyDeleteRevisionPodList.Items {
@@ -392,21 +396,21 @@ func (r *TrafficStatReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 						}
 						count += 1
 						if count == 1 {
-							log.Info("Ask to delete Revision", "REVISION_NAME", TargetService_Current_Revision)
+							loggerSD.Info("Ask to delete Revision", "REVISION_NAME", TargetService_Current_Revision)
 
 							err := serving.Revisions("default").Delete(context.Background(), TargetService_Current_Revision, metav1.DeleteOptions{})
 							if err != nil {
-								log.Error(err, err.Error())
+								loggerSD.Error(err, err.Error())
 							} else {
-								log.Info("Delete Revision ", "REVISION_NAME", TargetService_Current_Revision)
+								loggerSD.Info("Delete Revision ", "REVISION_NAME", TargetService_Current_Revision)
 							}
 							time.Sleep(2 * time.Second)
 						}
 
 						if err := r.Delete(ctx, targetpod, client.GracePeriodSeconds(0)); err != nil {
-							log.Error(err, err.Error())
+							loggerSD.Error(err, err.Error())
 						} else {
-							log.Info("Delete pod ", "POD_NAME", pod.Name)
+							loggerSD.Info("Delete pod ", "POD_NAME", pod.Name)
 						}
 					}
 				}
