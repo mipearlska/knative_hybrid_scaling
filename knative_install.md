@@ -67,14 +67,14 @@ spec:
 status:
   loadBalancer: {}
 ```
--Then:
+- Then:
 
 kubectl patch configmap/config-domain \
       --namespace knative-serving \
       --type merge \
       --patch '{"data":{"192.168.26.20.nip.io":""}}
 
--Verify:
+- Verify:
 ```
 root@tgen:~# kubectl describe configmap config-domain -n knative-serving
 Name:         config-domain
